@@ -24,11 +24,23 @@ jobs:
             process.exit(1);
           }
           
-          // Feed URLs（直接从仓库获取）
+          // Feed URLs
           const FEEDS = [
-            { url: 'https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/feed-x.json', name: 'X/Twitter' },
-            { url: 'https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/feed-blogs.json', name: '博客' },
-            { url: 'https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/feed-podcasts.json', name: '播客' }
+            { 
+              url: 'https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/feed-x.json', 
+              name: 'X/Twitter',
+              key: 'x'  // 数据在 .x 属性里
+            },
+            { 
+              url: 'https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/feed-blogs.json', 
+              name: '博客',
+              key: 'blogs'  // 数据在 .blogs 属性里
+            },
+            { 
+              url: 'https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/feed-podcasts.json', 
+              name: '播客',
+              key: 'podcasts'  // 数据在 .podcasts 属性里
+            }
           ];
           
           function fetchJSON(url) {
@@ -39,6 +51,7 @@ jobs:
                 res.on('end', () => {
                   try { 
                     const json = JSON.parse(data);
+                    console.log('获取成功:', url, '类型:', typeof json, 'keys:', Object.keys(json).join(','));
                     resolve(json); 
                   } catch(e) { 
                     console.log('解析失败:', url, e.message);
@@ -47,9 +60,6 @@ jobs:
                 });
               }).on('error', (err) => {
                 console.log('请求失败:', url, err.message);
-                resolve(null);
-              }).on('timeout', () => {
-                console.log('请求超时:', url);
                 resolve(null);
               });
             });
@@ -66,8 +76,7 @@ jobs:
                 headers: {
                   'Content-Type': 'application/json',
                   'Content-Length': Buffer.byteLength(data)
-                },
-                timeout: 15000
+                }
               };
               
               const req = https.request(options, (res) => {
@@ -79,7 +88,6 @@ jobs:
                 });
               });
               req.on('error', reject);
-              req.on('timeout', () => reject(new Error('飞书请求超时')));
               req.write(data);
               req.end();
             });
@@ -93,18 +101,29 @@ jobs:
               const results = await Promise.all(FEEDS.map(f => fetchJSON(f.url)));
               
               const allItems = [];
+              
               results.forEach((feed, index) => {
-                if (feed && Array.isArray(feed)) {
-                  console.log(FEEDS[index].name + ' 获取到 ' + feed.length + ' 条');
-                  feed.forEach(item => {
-                    allItems.push({
-                      ...item,
-                      _source: FEEDS[index].name
-                    });
-                  });
-                } else {
-                  console.log(FEEDS[index].name + ' 获取失败或为空');
+                if (!feed) {
+                  console.log(FEEDS[index].name + ' 获取失败');
+                  return;
                 }
+                
+                const key = FEEDS[index].key;
+                const items = feed[key];
+                
+                if (!items || !Array.isArray(items)) {
+                  console.log(FEEDS[index].name + ' 没有找到 ' + key + ' 数组');
+                  return;
+                }
+                
+                console.log(FEEDS[index].name + ' 获取到 ' + items.length + ' 条');
+                
+                items.forEach(item => {
+                  allItems.push({
+                    ...item,
+                    _source: FEEDS[index].name
+                  });
+                });
               });
               
               console.log('总计获取到 ' + allItems.length + ' 条内容');
@@ -114,15 +133,43 @@ jobs:
                 return;
               }
               
-              // 按时间排序（如果有 published 字段）
-              allItems.sort((a, b) => {
-                const tA = a.published ? new Date(a.published).getTime() : 0;
-                const tB = b.published ? new Date(b.published).getTime() : 0;
+              // 扁平化推文数据（X 的 tweets 是嵌套的）
+              const flatItems = [];
+              allItems.forEach(item => {
+                if (item._source === 'X/Twitter' && item.tweets && Array.isArray(item.tweets)) {
+                  item.tweets.forEach(tweet => {
+                    flatItems.push({
+                      title: item.name + ' (@' + item.handle + ')',
+                      text: tweet.text,
+                      url: tweet.url,
+                      createdAt: tweet.createdAt,
+                      likes: tweet.likes,
+                      _source: 'X/Twitter'
+                    });
+                  });
+                } else {
+                  // 博客和播客直接添加
+                  flatItems.push({
+                    title: item.title || item.name || '无标题',
+                    text: item.content || item.description || '',
+                    url: item.url,
+                    createdAt: item.publishedAt,
+                    _source: item._source
+                  });
+                }
+              });
+              
+              console.log('扁平化后共 ' + flatItems.length + ' 条');
+              
+              // 按时间排序
+              flatItems.sort((a, b) => {
+                const tA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+                const tB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
                 return tB - tA;
               });
               
-              // 取最新的 15 条
-              const items = allItems.slice(0, 15);
+              // 取最新的 20 条
+              const items = flatItems.slice(0, 20);
               
               // 构建飞书卡片
               const elements = [];
@@ -141,16 +188,15 @@ jobs:
               // 内容列表
               items.forEach((item, index) => {
                 const title = item.title || '无标题';
-                const url = item.url || item.link || '';
+                const url = item.url || '';
                 const source = item._source || '未知来源';
-                const author = item.author || item.creator || '';
-                const summary = item.summary || item.description || item.content || '';
-                const truncatedSummary = summary.length > 150 ? summary.substring(0, 150) + '...' : summary;
+                const text = item.text || '';
+                const truncatedText = text.length > 200 ? text.substring(0, 200) + '...' : text;
+                const likes = item.likes ? ' ❤️ ' + item.likes : '';
                 
                 let contentText = \`**\${index + 1}. \${title}**\`;
-                if (author) contentText += \`\\n👤 \${author}\`;
-                contentText += \`\\n📌 \${source}\`;
-                if (truncatedSummary) contentText += \`\\n📝 \${truncatedSummary}\`;
+                contentText += \`\\n📌 \${source}\${likes}\`;
+                if (truncatedText) contentText += \`\\n📝 \${truncatedText}\`;
                 if (url) contentText += \`\\n🔗 [查看原文](\${url})\`;
                 
                 elements.push({
@@ -172,7 +218,7 @@ jobs:
                 tag: 'div',
                 text: {
                   tag: 'lark_md',
-                  content: \`_⏰ \${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })} · 共 \${allItems.length} 条更新_\`
+                  content: \`_⏰ \${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })} · 共 \${flatItems.length} 条更新_\`
                 }
               });
               
