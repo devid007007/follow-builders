@@ -1,0 +1,150 @@
+name: Daily AI Builders Digest
+
+on:
+  schedule:
+    # 每天早上 9 点运行（UTC 时间 1 点，对应北京时间 9 点）
+    - cron: '0 1 * * *'
+  workflow_dispatch:  # 支持手动触发
+
+jobs:
+  send-digest:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Fetch and send digest
+        env:
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+        run: |
+          node -e "
+          const https = require('https');
+          
+          const FEISHU_WEBHOOK = process.env.FEISHU_WEBHOOK;
+          
+          // 中央 Feed URL
+          const FEED_URL = 'https://raw.githubusercontent.com/zarazhangrui/follow-builders-feed/main/daily.json';
+          
+          function fetchJSON(url) {
+            return new Promise((resolve, reject) => {
+              https.get(url, (res) => {
+                let data = '';
+                res.on('data', chunk => data += chunk);
+                res.on('end', () => {
+                  try { resolve(JSON.parse(data)); } 
+                  catch(e) { resolve(null); }
+                });
+              }).on('error', reject);
+            });
+          }
+          
+          function sendToFeishu(content) {
+            return new Promise((resolve, reject) => {
+              const data = JSON.stringify({ msg_type: 'interactive', card: content });
+              const url = new URL(FEISHU_WEBHOOK);
+              const options = {
+                hostname: url.hostname,
+                path: url.pathname + url.search,
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Content-Length': data.length
+                }
+              };
+              
+              const req = https.request(options, (res) => {
+                let body = '';
+                res.on('data', chunk => body += chunk);
+                res.on('end', () => resolve(body));
+              });
+              req.on('error', reject);
+              req.write(data);
+              req.end();
+            });
+          }
+          
+          async function main() {
+            try {
+              console.log('正在获取 Feed...');
+              const feed = await fetchJSON(FEED_URL);
+              
+              if (!feed || !feed.items || feed.items.length === 0) {
+                console.log('Feed 为空或获取失败');
+                return;
+              }
+              
+              // 构建飞书卡片消息
+              const elements = [];
+              
+              // 标题
+              elements.push({
+                tag: 'div',
+                text: {
+                  tag: 'lark_md',
+                  content: '**🤖 AI Builders 每日简报**'
+                }
+              });
+              
+              elements.push({ tag: 'hr' });
+              
+              // 遍历内容
+              const items = feed.items.slice(0, 10); // 最多显示 10 条
+              items.forEach((item, index) => {
+                const title = item.title || '无标题';
+                const url = item.url || '';
+                const source = item.source || '未知来源';
+                const summary = item.summary ? item.summary.substring(0, 200) + '...' : '';
+                
+                elements.push({
+                  tag: 'div',
+                  text: {
+                    tag: 'lark_md',
+                    content: \`**\${index + 1}. \${title}**\n📌 来源: \${source}\n📝 \${summary}\n🔗 [阅读原文](\${url})\`
+                  }
+                });
+                
+                if (index < items.length - 1) {
+                  elements.push({ tag: 'hr' });
+                }
+              });
+              
+              // 底部信息
+              elements.push({ tag: 'hr' });
+              elements.push({
+                tag: 'div',
+                text: {
+                  tag: 'lark_md',
+                  content: \`_⏰ \${new Date().toLocaleString('zh-CN')} · 共 \${feed.items.length} 条更新_\`
+                }
+              });
+              
+              const card = {
+                config: { wide_screen_mode: true },
+                header: {
+                  title: {
+                    tag: 'plain_text',
+                    content: 'AI Builders Digest'
+                  },
+                  template: 'blue'
+                },
+                elements: elements
+              };
+              
+              console.log('正在推送到飞书...');
+              const result = await sendToFeishu(card);
+              console.log('推送结果:', result);
+              
+            } catch (error) {
+              console.error('错误:', error.message);
+              process.exit(1);
+            }
+          }
+          
+          main();
+          "
